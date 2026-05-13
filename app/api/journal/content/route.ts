@@ -53,20 +53,6 @@ export async function POST(request: Request) {
     return Response.json({ error: "Missing fields" }, { status: 400 });
   }
 
-  // Reject updates to already-synced past entries
-  const todayStr = new Date().toISOString().slice(0, 10);
-  if (date < todayStr) {
-    const existingMeta = await db.select().from(journalMetadata).where(
-      and(eq(journalMetadata.userId, session.user.id), eq(journalMetadata.date, date))
-    );
-    if (existingMeta.length > 0) {
-      const existingContent = await db.select().from(journalContent)
-        .where(eq(journalContent.metadataId, existingMeta[0].id));
-      if (existingContent.length > 0) {
-        return Response.json({ error: "Past entries cannot be modified once synced." }, { status: 403 });
-      }
-    }
-  }
 
   const meta = await db
     .select()
