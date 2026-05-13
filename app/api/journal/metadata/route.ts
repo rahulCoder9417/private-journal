@@ -73,9 +73,9 @@ export async function POST(request: Request) {
   if (existing.length > 0) {
     await db
       .update(journalMetadata)
-      .set({ wordCount: wordCount ?? 0, updatedAt: now })
+      .set({ wordCount: wordCount ?? 0, salt, updatedAt: now })
       .where(eq(journalMetadata.id, existing[0].id));
-    return Response.json({ ...existing[0], wordCount, updatedAt: now });
+    return Response.json({ ...existing[0], wordCount, salt, updatedAt: now });
   }
 
   const id = crypto.randomUUID();
