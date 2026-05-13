@@ -1,12 +1,12 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
+import { auth } from "@/lib/auth";
 
 const PUBLIC_PATHS = ["/login", "/signup"];
 
-export function middleware(request: NextRequest) {
+export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
-  // Let API and Next.js internals pass through
   if (
     pathname.startsWith("/api") ||
     pathname.startsWith("/_next") ||
@@ -16,14 +16,28 @@ export function middleware(request: NextRequest) {
   }
 
   const isPublic = PUBLIC_PATHS.some((p) => pathname.startsWith(p));
-  const sessionToken =
-    request.cookies.get("better-auth.session_token")?.value;
 
-  if (!sessionToken && !isPublic) {
-    return NextResponse.redirect(new URL("/login", request.url));
+  // Log all cookie names to Vercel function logs for debugging
+  const cookieNames = request.cookies.getAll().map((c) => c.name);
+  console.log("[middleware]", pathname, "cookies:", cookieNames.join(", ") || "none");
+
+  let hasSession = false;
+  try {
+    const session = await auth.api.getSession({ headers: request.headers });
+    hasSession = !!session;
+    console.log("[middleware] session:", session ? session.user.email : "none");
+  } catch (e) {
+    // Edge Runtime may not support full auth — fall back to cookie sniff
+    console.error("[middleware] getSession error:", e);
+    hasSession = cookieNames.some(
+      (n) => n.includes("session_token") || n.includes("session-token")
+    );
   }
 
-  if (sessionToken && isPublic) {
+  if (!hasSession && !isPublic) {
+    return NextResponse.redirect(new URL("/login", request.url));
+  }
+  if (hasSession && isPublic) {
     return NextResponse.redirect(new URL("/", request.url));
   }
 
