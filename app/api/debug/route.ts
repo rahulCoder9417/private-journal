@@ -13,6 +13,7 @@ export async function GET() {
       ENCRYPTION_SECRET_set: !!process.env.ENCRYPTION_SECRET,
       ENCRYPTION_SECRET_length: process.env.ENCRYPTION_SECRET?.length ?? 0,
       BETTER_AUTH_SECRET_set: !!process.env.BETTER_AUTH_SECRET,
+      BETTER_AUTH_SECRET_length: process.env.BETTER_AUTH_SECRET?.length ?? 0,
     },
     cookies: cookieStore.getAll().map(c => ({ name: c.name, hasValue: !!c.value })),
     origin: headerStore.get("origin"),
