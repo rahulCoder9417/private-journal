@@ -6,12 +6,22 @@ export interface Task {
   id: string;
   text: string;
   done: boolean;
-  completedAt?: number; // timestamp when marked done
+  completedAt?: number;
+}
+
+export interface CustomTaskTemplate {
+  id: string;
+  name: string;
+  what: string;
+  skipDays: number[]; // 0=Sun … 6=Sat
+  updatedAt: number;
 }
 
 export interface JournalDraft {
   date: string;
   tasks: Task[];
+  extraTasks: Task[];
+  customTasks: Task[]; // per-day instances of templates (id matches template id)
   notes: string;
   achievements: string;
   learnings: string;
@@ -26,18 +36,26 @@ interface JournalDBSchema extends DBSchema {
     key: string;
     value: JournalDraft;
   };
+  customTaskTemplates: {
+    key: string;
+    value: CustomTaskTemplate;
+  };
 }
 
 let dbInstance: Promise<IDBPDatabase<JournalDBSchema>> | null = null;
 
 function getDB() {
   if (!dbInstance) {
-    dbInstance = openDB<JournalDBSchema>("journal-app", 2, {
+    dbInstance = openDB<JournalDBSchema>("journal-app", 3, {
       upgrade(db, oldVersion) {
         if (oldVersion < 1) {
           db.createObjectStore("journalDrafts", { keyPath: "date" });
         }
-        // v2: tasks changed from string to Task[] — handled at read time
+        if (oldVersion < 3) {
+          if (!db.objectStoreNames.contains("customTaskTemplates")) {
+            db.createObjectStore("customTaskTemplates", { keyPath: "id" });
+          }
+        }
       },
     });
   }
@@ -53,6 +71,8 @@ function normalizeDraft(raw: unknown): JournalDraft {
       : typeof r.tasks === "string" && r.tasks
       ? [{ id: crypto.randomUUID(), text: r.tasks as string, done: false }]
       : [],
+    extraTasks: Array.isArray(r.extraTasks) ? (r.extraTasks as Task[]) : [],
+    customTasks: Array.isArray(r.customTasks) ? (r.customTasks as Task[]) : [],
     notes: (r.notes as string) ?? "",
     achievements: (r.achievements as string) ?? "",
     learnings: (r.learnings as string) ?? "",
@@ -83,7 +103,30 @@ export async function markSynced(date: string, serverTs?: number): Promise<void>
   const db = await getDB();
   const draft = await db.get("journalDrafts", date);
   if (draft) {
-    // Use server timestamp so future stale checks compare against the exact cloud time
     await db.put("journalDrafts", { ...normalizeDraft(draft), syncedAt: serverTs ?? Date.now() });
   }
+}
+
+export async function getTemplates(): Promise<CustomTaskTemplate[]> {
+  const db = await getDB();
+  const all = await db.getAll("customTaskTemplates");
+  return all.sort((a, b) => a.updatedAt - b.updatedAt);
+}
+
+export async function saveTemplate(t: CustomTaskTemplate): Promise<void> {
+  const db = await getDB();
+  await db.put("customTaskTemplates", t);
+}
+
+export async function deleteTemplate(id: string): Promise<void> {
+  const db = await getDB();
+  await db.delete("customTaskTemplates", id);
+}
+
+export async function replaceAllTemplates(templates: CustomTaskTemplate[]): Promise<void> {
+  const db = await getDB();
+  const tx = db.transaction("customTaskTemplates", "readwrite");
+  await tx.store.clear();
+  for (const t of templates) await tx.store.put(t);
+  await tx.done;
 }

@@ -41,6 +41,8 @@ function getDayOfWeek(dateStr: string): number {
 
 interface JournalContent {
   tasks: Task[];
+  extraTasks?: Task[];
+  customTasks?: Task[];
   notes: string;
   achievements: string;
   learnings: string;
@@ -122,6 +124,8 @@ export default function JournalPage({ params }: { params: Promise<{ date: string
       const draft = {
         date,
         tasks: updates.tasks ?? tasks,
+        extraTasks: [],
+        customTasks: [],
         notes: updates.notes ?? notes,
         achievements: updates.achievements ?? achievements,
         learnings: updates.learnings ?? learnings,
@@ -208,7 +212,7 @@ export default function JournalPage({ params }: { params: Promise<{ date: string
       setTasks(c.tasks); setNotes(c.notes); setAchievements(c.achievements);
       setLearnings(c.learnings); setWeeklyGoal(c.weeklyGoal ?? ""); setWeeklyAchieved(c.weeklyAchieved ?? "");
       if (isToday) {
-        await saveDraft({ date, ...c, updatedAt: Date.now(), syncedAt: Date.now() });
+        await saveDraft({ date, ...c, extraTasks: c.extraTasks ?? [], customTasks: c.customTasks ?? [], updatedAt: Date.now(), syncedAt: Date.now() });
       }
       setIsStale(false); setSyncModal(null);
     } catch (err) {

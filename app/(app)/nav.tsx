@@ -12,6 +12,7 @@ const links = [
   { href: "/", label: "Today" },
   { href: "/read", label: "Read" },
   { href: "/analytics", label: "Analytics" },
+  { href: "/customize", label: "Customize" },
 ];
 
 export function AppNav({ userName }: { userName: string }) {
