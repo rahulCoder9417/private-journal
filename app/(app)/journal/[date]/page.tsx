@@ -172,6 +172,13 @@ export default function JournalPage({ params }: { params: Promise<{ date: string
   const handleSyncToCloud = async (password: string) => {
     setModalLoading(true); setModalError("");
     try {
+      const verify = await fetch("/api/journal/verify-password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password }),
+      });
+      if (!verify.ok) throw new Error("Wrong password");
+
       const pepper = await fetchPepper();
       const content: JournalContent = { tasks, notes, achievements, learnings, weeklyGoal, weeklyAchieved };
       const salt = generateSalt();
