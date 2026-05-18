@@ -202,15 +202,11 @@ export default function JournalPage({ params }: { params: Promise<{ date: string
       const { encryptedData, iv } = await encrypt(key, JSON.stringify(content));
       const wc = countWords([...tasks.map(t=>t.text), ...customTasks.map(t=>t.text), notes, achievements, learnings].join(" "));
 
-      const m = await fetch("/api/journal/metadata", { method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({ date, wordCount: wc, salt }) });
-      if (!m.ok) throw new Error((await m.json()).error ?? "Failed to save metadata");
-      const savedMeta: { updatedAt: string } = await m.json();
+      const saved = await fetch("/api/journal/save", { method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ date, wordCount: wc, salt, encryptedData, iv }) });
+      if (!saved.ok) throw new Error((await saved.json()).error ?? "Failed to save");
+      const savedMeta: { updatedAt: string } = await saved.json();
       const serverTs = new Date(savedMeta.updatedAt).getTime();
-
-      const c = await fetch("/api/journal/content", { method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({ date, encryptedData, iv }) });
-      if (!c.ok) throw new Error((await c.json()).error ?? "Failed to save content");
 
       await markSynced(date, Math.max(serverTs, Date.now()));
       setIsStale(false); setHasCloudData(true); setSyncModal(null);
@@ -223,6 +219,12 @@ export default function JournalPage({ params }: { params: Promise<{ date: string
   const handleLoadFromCloud = async (password: string) => {
     setModalLoading(true); setModalError("");
     try {
+      const verify = await fetch("/api/journal/verify-password", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password }),
+      });
+      if (!verify.ok) throw new Error("Wrong password");
+
       const pepper = await fetchPepper();
       const res = await fetch(`/api/journal/content?date=${date}`);
       const data: { salt: string; encryptedData: string; iv: string } | null = await res.json();
@@ -230,12 +232,13 @@ export default function JournalPage({ params }: { params: Promise<{ date: string
       const key = await deriveKey(password + pepper, data.salt);
       let plain: string;
       try { plain = await decrypt(key, data.encryptedData, data.iv); }
-      catch { throw new Error("Wrong password — decryption failed"); }
+      catch { throw new Error("Decryption failed — your password is correct but the server encryption key (ENCRYPTION_SECRET) may have changed since this entry was synced."); }
       const c: JournalContent = JSON.parse(plain);
-      setTasks(c.tasks); setNotes(c.notes); setAchievements(c.achievements);
-      setLearnings(c.learnings); setWeeklyGoal(c.weeklyGoal ?? ""); setWeeklyAchieved(c.weeklyAchieved ?? "");
+      setTasks(c.tasks ?? []); setNotes(c.notes ?? ""); setAchievements(c.achievements ?? "");
+      setLearnings(c.learnings ?? ""); setCustomTasks(c.customTasks ?? []);
+      if (dayOfWeek === 1) setWeeklyGoals(c.weeklyGoals ?? []);
       if (isToday) {
-        await saveDraft({ date, ...c, extraTasks: c.extraTasks ?? [], customTasks: c.customTasks ?? [], updatedAt: Date.now(), syncedAt: Date.now() });
+        await saveDraft({ date, ...c, extraTasks: c.extraTasks ?? [], customTasks: c.customTasks ?? [], weeklyGoals: c.weeklyGoals ?? [], updatedAt: Date.now(), syncedAt: Date.now() });
       }
       setIsStale(false); setSyncModal(null);
     } catch (err) {

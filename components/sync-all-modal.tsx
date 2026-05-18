@@ -69,24 +69,17 @@ export function SyncAllModal({ open, unsyncedDates, onClose, onComplete }: SyncA
           ].join(" ")
         );
 
-        const m = await fetch("/api/journal/metadata", {
+        const saved = await fetch("/api/journal/save", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ date, wordCount: wc, salt }),
+          body: JSON.stringify({ date, wordCount: wc, salt, encryptedData, iv }),
         });
-        if (!m.ok) throw new Error(`Metadata failed for ${date}`);
-        const savedMeta: { updatedAt: string } = await m.json();
-        const serverTs = new Date(savedMeta.updatedAt).getTime();
-
-        const c = await fetch("/api/journal/content", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ date, encryptedData, iv }),
-        });
-        if (!c.ok) {
-          const err = await c.json();
-          throw new Error(err.error ?? `Content failed for ${date}`);
+        if (!saved.ok) {
+          const err = await saved.json();
+          throw new Error(err.error ?? `Save failed for ${date}`);
         }
+        const savedMeta: { updatedAt: string } = await saved.json();
+        const serverTs = new Date(savedMeta.updatedAt).getTime();
 
         await markSynced(date, Math.max(serverTs, Date.now()));
         setDone(i + 1);
