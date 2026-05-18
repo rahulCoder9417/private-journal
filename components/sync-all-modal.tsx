@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { getDraft, markSynced } from "@/hooks/use-journal-db";
 import { deriveKey, encrypt, generateSalt, countWords } from "@/lib/crypto";
+import type { CustomTaskTemplate } from "@/hooks/use-journal-db";
 import { fetchPepper } from "@/lib/pepper";
 
 interface SyncAllModalProps {
@@ -47,18 +48,25 @@ export function SyncAllModal({ open, unsyncedDates, onClose, onComplete }: SyncA
 
         const content = {
           tasks: draft.tasks,
+          extraTasks: draft.extraTasks,
+          customTasks: draft.customTasks,
+          templates: [] as CustomTaskTemplate[],
           notes: draft.notes,
           achievements: draft.achievements,
           learnings: draft.learnings,
-          weeklyGoal: draft.weeklyGoal ?? "",
-          weeklyAchieved: draft.weeklyAchieved ?? "",
+          weeklyGoals: draft.weeklyGoals ?? [],
         };
 
         const salt = generateSalt();
         const key = await deriveKey(password + pepper, salt);
         const { encryptedData, iv } = await encrypt(key, JSON.stringify(content));
         const wc = countWords(
-          [...draft.tasks.map((t) => t.text), draft.notes, draft.achievements, draft.learnings].join(" ")
+          [
+            ...draft.tasks.map((t) => t.text),
+            ...draft.extraTasks.map((t) => t.text),
+            ...draft.customTasks.map((t) => t.text),
+            draft.notes, draft.achievements, draft.learnings,
+          ].join(" ")
         );
 
         const m = await fetch("/api/journal/metadata", {
@@ -80,7 +88,7 @@ export function SyncAllModal({ open, unsyncedDates, onClose, onComplete }: SyncA
           throw new Error(err.error ?? `Content failed for ${date}`);
         }
 
-        await markSynced(date, serverTs);
+        await markSynced(date, Math.max(serverTs, Date.now()));
         setDone(i + 1);
       }
 
@@ -105,7 +113,7 @@ export function SyncAllModal({ open, unsyncedDates, onClose, onComplete }: SyncA
           <form onSubmit={handleSync} className="space-y-4">
             <p className="text-sm text-zinc-400">
               <span className="text-zinc-200 font-medium">{unsyncedDates.length}</span>{" "}
-              {unsyncedDates.length === 1 ? "entry" : "entries"} will be encrypted and saved to the cloud.
+              {unsyncedDates.length === 1 ? "entry has" : "entries have"} local changes not yet in the cloud.
             </p>
             <div className="rounded-lg bg-zinc-900 border border-zinc-800 px-3 py-2 space-y-1 max-h-32 overflow-y-auto">
               {unsyncedDates.map((d) => (

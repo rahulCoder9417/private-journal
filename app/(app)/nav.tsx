@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { signOut } from "@/lib/auth-client";
-import { getAllDraftDates } from "@/hooks/use-journal-db";
+import { getAllDrafts } from "@/hooks/use-journal-db";
 import { Button } from "@/components/ui/button";
 import { SyncAllModal } from "@/components/sync-all-modal";
 
@@ -22,19 +22,12 @@ export function AppNav({ userName }: { userName: string }) {
   const [syncAllOpen, setSyncAllOpen] = useState(false);
 
   const checkUnsynced = useCallback(async () => {
-    const localDates = await getAllDraftDates();
-    if (!localDates.length) { setUnsyncedDates([]); return; }
-
-    const sorted = [...localDates].sort();
-    try {
-      const res = await fetch(
-        `/api/journal/metadata?from=${sorted[0]}&to=${sorted[sorted.length - 1]}`
-      );
-      if (!res.ok) return;
-      const rows: { date: string }[] = await res.json();
-      const synced = new Set(rows.map((r) => r.date));
-      setUnsyncedDates(localDates.filter((d) => !synced.has(d)));
-    } catch { /* offline */ }
+    const drafts = await getAllDrafts();
+    const unsynced = drafts
+      .filter((d) => d.updatedAt > (d.syncedAt ?? 0))
+      .map((d) => d.date)
+      .sort();
+    setUnsyncedDates(unsynced);
   }, []);
 
   useEffect(() => {

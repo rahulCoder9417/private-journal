@@ -9,6 +9,12 @@ export interface Task {
   completedAt?: number;
 }
 
+export interface WeeklyGoalItem {
+  id: string;
+  text: string;
+  done: boolean;
+}
+
 export interface CustomTaskTemplate {
   id: string;
   name: string;
@@ -25,8 +31,9 @@ export interface JournalDraft {
   notes: string;
   achievements: string;
   learnings: string;
-  weeklyGoal?: string;
-  weeklyAchieved?: string;
+  weeklyGoal?: string;       // legacy compat
+  weeklyAchieved?: string;   // legacy compat
+  weeklyGoals?: WeeklyGoalItem[];
   updatedAt: number;
   syncedAt?: number;
 }
@@ -78,6 +85,7 @@ function normalizeDraft(raw: unknown): JournalDraft {
     learnings: (r.learnings as string) ?? "",
     weeklyGoal: (r.weeklyGoal as string) ?? "",
     weeklyAchieved: (r.weeklyAchieved as string) ?? "",
+    weeklyGoals: Array.isArray(r.weeklyGoals) ? (r.weeklyGoals as WeeklyGoalItem[]) : [],
     updatedAt: (r.updatedAt as number) ?? Date.now(),
     syncedAt: r.syncedAt as number | undefined,
   };
@@ -97,6 +105,12 @@ export async function saveDraft(draft: JournalDraft): Promise<void> {
 export async function getAllDraftDates(): Promise<string[]> {
   const db = await getDB();
   return db.getAllKeys("journalDrafts");
+}
+
+export async function getAllDrafts(): Promise<JournalDraft[]> {
+  const db = await getDB();
+  const all = await db.getAll("journalDrafts");
+  return all.map(normalizeDraft);
 }
 
 export async function markSynced(date: string, serverTs?: number): Promise<void> {

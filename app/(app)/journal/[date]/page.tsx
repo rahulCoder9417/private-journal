@@ -4,7 +4,7 @@ import { useEffect, useRef, useState, use } from "react";
 import { useRouter } from "next/navigation";
 import confetti from "canvas-confetti";
 import { toast } from "sonner";
-import { getDraft, saveDraft, markSynced, type Task } from "@/hooks/use-journal-db";
+import { getDraft, saveDraft, markSynced, type Task, type WeeklyGoalItem } from "@/hooks/use-journal-db";
 import { deriveKey, encrypt, decrypt, generateSalt, countWords } from "@/lib/crypto";
 import { fetchPepper } from "@/lib/pepper";
 import { playTaskDone, playAllDone } from "@/lib/sounds";
@@ -48,6 +48,7 @@ interface JournalContent {
   learnings: string;
   weeklyGoal?: string;
   weeklyAchieved?: string;
+  weeklyGoals?: WeeklyGoalItem[];
 }
 
 // ─── component ───────────────────────────────────────────────────────────────
@@ -66,12 +67,14 @@ export default function JournalPage({ params }: { params: Promise<{ date: string
   const canGoNext = nextDate <= today;
 
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [customTasks, setCustomTasks] = useState<Task[]>([]);
   const [newTaskText, setNewTaskText] = useState("");
   const [notes, setNotes] = useState("");
   const [achievements, setAchievements] = useState("");
   const [learnings, setLearnings] = useState("");
   const [weeklyGoal, setWeeklyGoal] = useState("");
   const [weeklyAchieved, setWeeklyAchieved] = useState("");
+  const [weeklyGoals, setWeeklyGoals] = useState<WeeklyGoalItem[]>([]);
   const [isStale, setIsStale] = useState(false);
   const [hasCloudData, setHasCloudData] = useState(false);
   const [syncModal, setSyncModal] = useState<"save" | "load" | null>(null);
@@ -93,12 +96,22 @@ export default function JournalPage({ params }: { params: Promise<{ date: string
       const draft = await getDraft(date);
       if (!cancelled && draft) {
         setTasks(draft.tasks);
+        setCustomTasks(draft.customTasks ?? []);
         setNotes(draft.notes);
         setAchievements(draft.achievements);
         setLearnings(draft.learnings);
         setWeeklyGoal(draft.weeklyGoal ?? "");
         setWeeklyAchieved(draft.weeklyAchieved ?? "");
         setWordCount(countWords([...draft.tasks.map(t=>t.text), draft.notes, draft.achievements, draft.learnings].join(" ")));
+
+        // Load weekly goals: from this entry if Monday, from that week's Monday if Saturday
+        if (dayOfWeek === 1) {
+          setWeeklyGoals(draft.weeklyGoals ?? []);
+        } else if (dayOfWeek === 6) {
+          const mondayDate = adjacentDate(date, -5);
+          const mondayDraft = await getDraft(mondayDate);
+          if (!cancelled) setWeeklyGoals(mondayDraft?.weeklyGoals ?? []);
+        }
       }
       try {
         const res = await fetch(`/api/journal/metadata?date=${date}`);
@@ -180,11 +193,14 @@ export default function JournalPage({ params }: { params: Promise<{ date: string
       if (!verify.ok) throw new Error("Wrong password");
 
       const pepper = await fetchPepper();
-      const content: JournalContent = { tasks, notes, achievements, learnings, weeklyGoal, weeklyAchieved };
+      const content: JournalContent = {
+        tasks, customTasks, notes, achievements, learnings,
+        weeklyGoals: dayOfWeek === 1 ? weeklyGoals : [],
+      };
       const salt = generateSalt();
       const key = await deriveKey(password + pepper, salt);
       const { encryptedData, iv } = await encrypt(key, JSON.stringify(content));
-      const wc = countWords([...tasks.map(t=>t.text), notes, achievements, learnings].join(" "));
+      const wc = countWords([...tasks.map(t=>t.text), ...customTasks.map(t=>t.text), notes, achievements, learnings].join(" "));
 
       const m = await fetch("/api/journal/metadata", { method:"POST", headers:{"Content-Type":"application/json"},
         body: JSON.stringify({ date, wordCount: wc, salt }) });
@@ -196,7 +212,7 @@ export default function JournalPage({ params }: { params: Promise<{ date: string
         body: JSON.stringify({ date, encryptedData, iv }) });
       if (!c.ok) throw new Error((await c.json()).error ?? "Failed to save content");
 
-      await markSynced(date, serverTs);
+      await markSynced(date, Math.max(serverTs, Date.now()));
       setIsStale(false); setHasCloudData(true); setSyncModal(null);
       setSyncStatus("saved"); setTimeout(() => setSyncStatus("idle"), 2500);
     } catch (err) {
@@ -301,13 +317,19 @@ export default function JournalPage({ params }: { params: Promise<{ date: string
         </div>
       )}
 
-      {/* Weekly Goal (Monday) */}
-      {dayOfWeek === 1 && (weeklyGoal || isToday) && (
+      {/* Weekly Goals (Monday) */}
+      {dayOfWeek === 1 && (weeklyGoals.length > 0 || weeklyGoal) && (
         <EntrySection icon="🎯" title="This Week's Goals" accent="indigo">
-          {isToday ? (
-            <Textarea value={weeklyGoal} onChange={e => { setWeeklyGoal(e.target.value); autoSave({ weeklyGoal: e.target.value }); }}
-              placeholder="Set your goals for this week…" rows={3}
-              className="bg-zinc-900/60 border-zinc-700/60 text-zinc-200 placeholder:text-zinc-600 resize-none" />
+          {weeklyGoals.length > 0 ? (
+            <div className="space-y-2">
+              {weeklyGoals.map(goal => (
+                <div key={goal.id} className="flex items-start gap-3">
+                  <Checkbox checked={goal.done} disabled
+                    className="mt-0.5 border-indigo-600/60 data-[state=checked]:bg-indigo-500 data-[state=checked]:border-indigo-500 disabled:opacity-60 disabled:cursor-not-allowed" />
+                  <span className={`text-sm leading-relaxed ${goal.done ? "line-through text-zinc-500" : "text-zinc-200"}`}>{goal.text}</span>
+                </div>
+              ))}
+            </div>
           ) : (
             <ReadText text={weeklyGoal} placeholder="No weekly goals set." />
           )}
@@ -344,6 +366,21 @@ export default function JournalPage({ params }: { params: Promise<{ date: string
           )}
         </div>
       </EntrySection>
+
+      {/* Custom Tasks (read-only) */}
+      {customTasks.length > 0 && (
+        <EntrySection icon="◆" title="Custom Tasks" accent="indigo">
+          <div className="space-y-2">
+            {customTasks.map(task => (
+              <div key={task.id} className="flex items-start gap-3">
+                <Checkbox checked={task.done} disabled
+                  className="mt-0.5 border-indigo-600/60 data-[state=checked]:bg-indigo-500 data-[state=checked]:border-indigo-500 disabled:opacity-60 disabled:cursor-not-allowed" />
+                <span className={`text-sm leading-relaxed ${task.done ? "line-through text-zinc-500" : "text-zinc-200"}`}>{task.text}</span>
+              </div>
+            ))}
+          </div>
+        </EntrySection>
+      )}
 
       <Separator className="bg-zinc-800" />
 
@@ -386,18 +423,20 @@ export default function JournalPage({ params }: { params: Promise<{ date: string
         </div>
       </EntrySection>
 
-      {/* Saturday: Weekly Review */}
-      {dayOfWeek === 6 && (weeklyAchieved || isToday) && (
+      {/* Saturday: Weekly Goals Review (read-only) */}
+      {dayOfWeek === 6 && weeklyGoals.length > 0 && (
         <>
           <Separator className="bg-zinc-800" />
-          <EntrySection icon="🏁" title="This Week — Goals Achieved" accent="emerald">
-            {isToday ? (
-              <Textarea value={weeklyAchieved} onChange={e => { setWeeklyAchieved(e.target.value); autoSave({ weeklyAchieved: e.target.value }); }}
-                placeholder="Which goals did you achieve?" rows={4}
-                className="bg-zinc-900/60 border-zinc-700/60 text-zinc-200 placeholder:text-zinc-600 resize-none" />
-            ) : (
-              <ReadText text={weeklyAchieved} placeholder="No review recorded." />
-            )}
+          <EntrySection icon="🎯" title="This Week's Goals" accent="indigo">
+            <div className="space-y-2">
+              {weeklyGoals.map(goal => (
+                <div key={goal.id} className="flex items-start gap-3">
+                  <Checkbox checked={goal.done} disabled
+                    className="mt-0.5 border-indigo-600/60 data-[state=checked]:bg-indigo-500 data-[state=checked]:border-indigo-500 disabled:opacity-60 disabled:cursor-not-allowed" />
+                  <span className={`text-sm leading-relaxed ${goal.done ? "line-through text-zinc-500" : "text-zinc-200"}`}>{goal.text}</span>
+                </div>
+              ))}
+            </div>
           </EntrySection>
         </>
       )}

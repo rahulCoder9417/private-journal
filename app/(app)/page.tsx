@@ -11,6 +11,7 @@ import {
   type Task,
   type CustomTaskTemplate,
   type JournalDraft,
+  type WeeklyGoalItem,
 } from "@/hooks/use-journal-db";
 import { deriveKey, encrypt, decrypt, generateSalt, countWords } from "@/lib/crypto";
 import { fetchPepper } from "@/lib/pepper";
@@ -25,6 +26,13 @@ function toYMD(d: Date) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
+function adjacentDate(dateStr: string, delta: number): string {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const date = new Date(y, m - 1, d);
+  date.setDate(date.getDate() + delta);
+  return toYMD(date);
+}
+
 interface JournalContent {
   tasks: Task[];
   extraTasks: Task[];
@@ -35,6 +43,7 @@ interface JournalContent {
   learnings: string;
   weeklyGoal?: string;
   weeklyAchieved?: string;
+  weeklyGoals?: WeeklyGoalItem[];
 }
 
 function mergeContents(local: JournalContent, cloud: JournalContent): JournalContent {
@@ -54,8 +63,7 @@ function mergeContents(local: JournalContent, cloud: JournalContent): JournalCon
     notes: local.notes || cloud.notes,
     achievements: local.achievements || cloud.achievements,
     learnings: local.learnings || cloud.learnings,
-    weeklyGoal: local.weeklyGoal || cloud.weeklyGoal,
-    weeklyAchieved: local.weeklyAchieved || cloud.weeklyAchieved,
+    weeklyGoals: local.weeklyGoals?.length ? local.weeklyGoals : cloud.weeklyGoals,
   };
 }
 
@@ -98,8 +106,11 @@ export default function HomePage() {
   const [notes, setNotes] = useState("");
   const [achievements, setAchievements] = useState("");
   const [learnings, setLearnings] = useState("");
-  const [weeklyGoal, setWeeklyGoal] = useState("");
-  const [weeklyAchieved, setWeeklyAchieved] = useState("");
+  // Weekly goals — set on Monday, reviewed on Saturday
+  const [weeklyGoals, setWeeklyGoals] = useState<WeeklyGoalItem[]>([]);
+  const [newGoalText, setNewGoalText] = useState("");
+  // On Saturday, goals are loaded from Monday's draft
+  const mondayDraftRef = useRef<JournalDraft | null>(null);
   const [isStale, setIsStale] = useState(false);
   const [syncModal, setSyncModal] = useState<"save" | "load" | null>(null);
   const [mergeEnabled, setMergeEnabled] = useState(false);
@@ -114,6 +125,7 @@ export default function HomePage() {
   useEffect(() => {
     let cancelled = false;
     (async () => {
+      const mondayDate = adjacentDate(todayStr, -(dayOfWeek === 0 ? -1 : dayOfWeek - 1));
       const [draft, tmplList] = await Promise.all([getDraft(todayStr), getTemplates()]);
       if (cancelled) return;
 
@@ -125,8 +137,6 @@ export default function HomePage() {
         setNotes(draft.notes);
         setAchievements(draft.achievements);
         setLearnings(draft.learnings);
-        setWeeklyGoal(draft.weeklyGoal ?? "");
-        setWeeklyAchieved(draft.weeklyAchieved ?? "");
         setWordCount(calcWC(draft.tasks, draft.extraTasks, reconciled, draft.notes, draft.achievements, draft.learnings));
         setLocalHasEntry(true);
       } else {
@@ -134,6 +144,17 @@ export default function HomePage() {
         setCustomTasks(reconciled);
       }
       setTemplates(tmplList);
+
+      // Load weekly goals: from today's draft on Monday, from Monday's draft on Saturday
+      if (dayOfWeek === 1) {
+        setWeeklyGoals(draft?.weeklyGoals ?? []);
+      } else if (dayOfWeek === 6) {
+        const mondayDraft = await getDraft(mondayDate);
+        if (!cancelled) {
+          mondayDraftRef.current = mondayDraft ?? null;
+          setWeeklyGoals(mondayDraft?.weeklyGoals ?? []);
+        }
+      }
 
       try {
         const res = await fetch(`/api/journal/metadata?date=${todayStr}`);
@@ -160,11 +181,10 @@ export default function HomePage() {
       notes: overrides.notes ?? notes,
       achievements: overrides.achievements ?? achievements,
       learnings: overrides.learnings ?? learnings,
-      weeklyGoal: overrides.weeklyGoal ?? weeklyGoal,
-      weeklyAchieved: overrides.weeklyAchieved ?? weeklyAchieved,
+      weeklyGoals: overrides.weeklyGoals ?? (dayOfWeek === 1 ? weeklyGoals : []),
       updatedAt: Date.now(),
     }),
-    [todayStr, tasks, extraTasks, customTasks, notes, achievements, learnings, weeklyGoal, weeklyAchieved]
+    [todayStr, tasks, extraTasks, customTasks, notes, achievements, learnings, weeklyGoals, dayOfWeek]
   );
 
   const triggerAutoSave = useCallback((overrides: Partial<JournalDraft> = {}) => {
@@ -176,6 +196,41 @@ export default function HomePage() {
       setWordCount(calcWC(draft.tasks, draft.extraTasks, draft.customTasks, draft.notes, draft.achievements, draft.learnings));
     }, 600);
   }, [buildDraft]);
+
+  // --- Weekly goals (Monday: edit, Saturday: check off from Monday's draft) ---
+  const addGoal = () => {
+    if (!newGoalText.trim()) return;
+    const next: WeeklyGoalItem[] = [...weeklyGoals, { id: crypto.randomUUID(), text: newGoalText.trim(), done: false }];
+    setWeeklyGoals(next);
+    setNewGoalText("");
+    triggerAutoSave({ weeklyGoals: next });
+  };
+
+  const toggleGoal = async (id: string) => {
+    const next = weeklyGoals.map(g => g.id === id ? { ...g, done: !g.done } : g);
+    setWeeklyGoals(next);
+    if (dayOfWeek === 1) {
+      triggerAutoSave({ weeklyGoals: next });
+    } else if (dayOfWeek === 6) {
+      const mondayDate = adjacentDate(todayStr, -5);
+      // Build a minimal Monday draft if one doesn't exist yet
+      const base: JournalDraft = mondayDraftRef.current ?? {
+        date: mondayDate,
+        tasks: [], extraTasks: [], customTasks: [],
+        notes: "", achievements: "", learnings: "",
+        weeklyGoals: [], updatedAt: Date.now(),
+      };
+      const updated: JournalDraft = { ...base, weeklyGoals: next, updatedAt: Date.now() };
+      mondayDraftRef.current = updated;
+      await saveDraft(updated);
+    }
+  };
+
+  const deleteGoal = (id: string) => {
+    const next = weeklyGoals.filter(g => g.id !== id);
+    setWeeklyGoals(next);
+    triggerAutoSave({ weeklyGoals: next });
+  };
 
   // --- Regular tasks ---
   const addTask = () => {
@@ -237,7 +292,8 @@ export default function HomePage() {
   };
 
   const currentContent = (): JournalContent => ({
-    tasks, extraTasks, customTasks, templates, notes, achievements, learnings, weeklyGoal, weeklyAchieved,
+    tasks, extraTasks, customTasks, templates, notes, achievements, learnings,
+    weeklyGoals: dayOfWeek === 1 ? weeklyGoals : [],
   });
 
   const applyContent = (c: JournalContent) => {
@@ -248,8 +304,7 @@ export default function HomePage() {
     setNotes(c.notes);
     setAchievements(c.achievements);
     setLearnings(c.learnings);
-    setWeeklyGoal(c.weeklyGoal ?? "");
-    setWeeklyAchieved(c.weeklyAchieved ?? "");
+    if (dayOfWeek === 1) setWeeklyGoals(c.weeklyGoals ?? []);
   };
 
   const handleSyncToCloud = async (password: string) => {
@@ -297,8 +352,8 @@ export default function HomePage() {
       });
       if (!c2.ok) throw new Error("Failed to save content");
 
-      await saveDraft({ date: todayStr, ...content, updatedAt: Date.now(), syncedAt: serverTs });
-      await markSynced(todayStr, serverTs);
+      const syncedAt = Math.max(serverTs, Date.now());
+      await saveDraft({ date: todayStr, ...content, updatedAt: syncedAt, syncedAt });
       setIsStale(false); setSyncModal(null);
       setSyncStatus("saved"); setTimeout(() => setSyncStatus("idle"), 2500);
     } catch (err) {
@@ -318,13 +373,14 @@ export default function HomePage() {
       try { plain = await decrypt(key, data.encryptedData, data.iv); }
       catch { throw new Error("Wrong password — decryption failed"); }
       const content: JournalContent = JSON.parse(plain);
-      // Ensure backward compat with old synced entries that lack extraTasks/customTasks/templates
+      // Ensure backward compat with old synced entries
       content.extraTasks = content.extraTasks ?? [];
       content.customTasks = content.customTasks ?? [];
       content.templates = content.templates ?? [];
+      content.weeklyGoals = content.weeklyGoals ?? [];
       applyContent(content);
       setWordCount(calcWC(content.tasks, content.extraTasks, content.customTasks, content.notes, content.achievements, content.learnings));
-      await saveDraft({ date: todayStr, ...content, updatedAt: Date.now(), syncedAt: Date.now() });
+      await saveDraft({ date: todayStr, ...content, weeklyGoals: content.weeklyGoals ?? [], updatedAt: Date.now(), syncedAt: Date.now() });
       setIsStale(false); setSyncModal(null);
     } catch (err) {
       setModalError(err instanceof Error ? err.message : "Failed to load");
@@ -392,12 +448,40 @@ export default function HomePage() {
         </div>
       )}
 
-      {/* Monday: Weekly Goals */}
-      {dayOfWeek === 1 && (
-        <Section icon="🎯" title="This Week's Goals" accent="indigo" subtitle="What do you want to achieve this week?">
-          <Textarea value={weeklyGoal} onChange={e => { setWeeklyGoal(e.target.value); triggerAutoSave({ weeklyGoal: e.target.value }); }}
-            placeholder="Set your goals for this week…" rows={3}
-            className="bg-zinc-900/60 border-zinc-700/60 text-zinc-200 placeholder:text-zinc-600 resize-none" />
+      {/* Monday / Saturday: Weekly Goals */}
+      {(dayOfWeek === 1 || dayOfWeek === 6) && (
+        <Section icon="🎯" title="This Week's Goals" accent="indigo"
+          subtitle={dayOfWeek === 1 ? "What do you want to achieve this week?" : "How did your goals go?"}>
+          <div className="space-y-2">
+            {weeklyGoals.length === 0 && dayOfWeek === 6 && (
+              <p className="text-sm text-zinc-600 italic">No goals were set this Monday.</p>
+            )}
+            {weeklyGoals.map(goal => (
+              <div key={goal.id} className="flex items-start gap-3 group">
+                <Checkbox
+                  checked={goal.done}
+                  onCheckedChange={() => toggleGoal(goal.id)}
+                  className="mt-0.5 border-indigo-600/60 data-[state=checked]:bg-indigo-500 data-[state=checked]:border-indigo-500"
+                />
+                <span className={`flex-1 text-sm leading-relaxed ${goal.done ? "line-through text-zinc-500" : "text-zinc-200"}`}>
+                  {goal.text}
+                </span>
+                {dayOfWeek === 1 && (
+                  <button onClick={() => deleteGoal(goal.id)}
+                    className="opacity-0 group-hover:opacity-100 text-zinc-600 hover:text-red-400 text-xs transition-opacity">✕</button>
+                )}
+              </div>
+            ))}
+            {dayOfWeek === 1 && (
+              <div className="flex items-center gap-2 mt-3">
+                <input type="text" value={newGoalText} onChange={e => setNewGoalText(e.target.value)}
+                  onKeyDown={e => e.key === "Enter" && addGoal()} placeholder="Add a goal…"
+                  className="flex-1 bg-transparent border-b border-zinc-700 pb-1 text-sm text-zinc-300 placeholder:text-zinc-600 outline-none focus:border-indigo-500 transition-colors" />
+                <button onClick={addGoal} disabled={!newGoalText.trim()}
+                  className="text-xs text-indigo-400 hover:text-indigo-300 disabled:opacity-30 transition-colors">+ Add</button>
+              </div>
+            )}
+          </div>
         </Section>
       )}
 
@@ -510,17 +594,6 @@ export default function HomePage() {
         </div>
       </Section>
 
-      {/* Saturday: Weekly Review */}
-      {dayOfWeek === 6 && (
-        <>
-          <Separator className="bg-zinc-800" />
-          <Section icon="🏁" title="This Week — Goals Achieved" accent="emerald" subtitle="Reflect on this week">
-            <Textarea value={weeklyAchieved} onChange={e => { setWeeklyAchieved(e.target.value); triggerAutoSave({ weeklyAchieved: e.target.value }); }}
-              placeholder="Which goals did you achieve?" rows={4}
-              className="bg-zinc-900/60 border-zinc-700/60 text-zinc-200 placeholder:text-zinc-600 resize-none" />
-          </Section>
-        </>
-      )}
 
       {/* Completed tasks timeline */}
       {(tasks.some(t => t.done) || extraTasks.some(t => t.done) || customTasks.some(t => t.done)) && (
