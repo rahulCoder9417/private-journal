@@ -5,10 +5,9 @@ import { useRouter } from "next/navigation";
 import confetti from "canvas-confetti";
 import { toast } from "sonner";
 import { getDraft, saveDraft, markSynced, type Task, type WeeklyGoalItem } from "@/hooks/use-journal-db";
-import { deriveKey, encrypt, decrypt, generateSalt, countWords } from "@/lib/crypto";
-import { fetchPepper } from "@/lib/pepper";
+import { countWords } from "@/lib/crypto";
+import { pushEntry, pullEntry } from "@/lib/sync";
 import { playTaskDone, playAllDone } from "@/lib/sounds";
-import { PasswordModal } from "@/components/password-modal";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -77,9 +76,7 @@ export default function JournalPage({ params }: { params: Promise<{ date: string
   const [weeklyGoals, setWeeklyGoals] = useState<WeeklyGoalItem[]>([]);
   const [isStale, setIsStale] = useState(false);
   const [hasCloudData, setHasCloudData] = useState(false);
-  const [syncModal, setSyncModal] = useState<"save" | "load" | null>(null);
-  const [modalLoading, setModalLoading] = useState(false);
-  const [modalError, setModalError] = useState("");
+  const [busy, setBusy] = useState(false);
   const [syncStatus, setSyncStatus] = useState<"idle" | "saved">("idle");
   const [wordCount, setWordCount] = useState(0);
 
@@ -182,68 +179,39 @@ export default function JournalPage({ params }: { params: Promise<{ date: string
     setTasks(next); autoSave({ tasks: next });
   };
 
-  const handleSyncToCloud = async (password: string) => {
-    setModalLoading(true); setModalError("");
+  const handleSyncToCloud = async () => {
+    setBusy(true);
     try {
-      const verify = await fetch("/api/journal/verify-password", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password }),
-      });
-      if (!verify.ok) throw new Error("Wrong password");
-
-      const pepper = await fetchPepper();
       const content: JournalContent = {
         tasks, customTasks, notes, achievements, learnings,
         weeklyGoals: dayOfWeek === 1 ? weeklyGoals : [],
       };
-      const salt = generateSalt();
-      const key = await deriveKey(password + pepper, salt);
-      const { encryptedData, iv } = await encrypt(key, JSON.stringify(content));
       const wc = countWords([...tasks.map(t=>t.text), ...customTasks.map(t=>t.text), notes, achievements, learnings].join(" "));
+      const syncedAt = await pushEntry(date, content, wc);
 
-      const saved = await fetch("/api/journal/save", { method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({ date, wordCount: wc, salt, encryptedData, iv }) });
-      if (!saved.ok) throw new Error((await saved.json()).error ?? "Failed to save");
-      const savedMeta: { updatedAt: string } = await saved.json();
-      const serverTs = new Date(savedMeta.updatedAt).getTime();
-
-      await markSynced(date, Math.max(serverTs, Date.now()));
-      setIsStale(false); setHasCloudData(true); setSyncModal(null);
+      await markSynced(date, syncedAt);
+      setIsStale(false); setHasCloudData(true);
       setSyncStatus("saved"); setTimeout(() => setSyncStatus("idle"), 2500);
     } catch (err) {
-      setModalError(err instanceof Error ? err.message : "Sync failed");
-    } finally { setModalLoading(false); }
+      toast.error(err instanceof Error ? err.message : "Sync failed");
+    } finally { setBusy(false); }
   };
 
-  const handleLoadFromCloud = async (password: string) => {
-    setModalLoading(true); setModalError("");
+  const handleLoadFromCloud = async () => {
+    setBusy(true);
     try {
-      const verify = await fetch("/api/journal/verify-password", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password }),
-      });
-      if (!verify.ok) throw new Error("Wrong password");
-
-      const pepper = await fetchPepper();
-      const res = await fetch(`/api/journal/content?date=${date}`);
-      const data: { salt: string; encryptedData: string; iv: string } | null = await res.json();
-      if (!data) throw new Error("No cloud data found for this date");
-      const key = await deriveKey(password + pepper, data.salt);
-      let plain: string;
-      try { plain = await decrypt(key, data.encryptedData, data.iv); }
-      catch { throw new Error("Decryption failed — your password is correct but the server encryption key (ENCRYPTION_SECRET) may have changed since this entry was synced."); }
-      const c: JournalContent = JSON.parse(plain);
+      const c = await pullEntry<JournalContent>(date);
+      if (!c) throw new Error("No cloud data found for this date");
       setTasks(c.tasks ?? []); setNotes(c.notes ?? ""); setAchievements(c.achievements ?? "");
       setLearnings(c.learnings ?? ""); setCustomTasks(c.customTasks ?? []);
       if (dayOfWeek === 1) setWeeklyGoals(c.weeklyGoals ?? []);
       if (isToday) {
         await saveDraft({ date, ...c, extraTasks: c.extraTasks ?? [], customTasks: c.customTasks ?? [], weeklyGoals: c.weeklyGoals ?? [], updatedAt: Date.now(), syncedAt: Date.now() });
       }
-      setIsStale(false); setSyncModal(null);
+      setIsStale(false);
     } catch (err) {
-      setModalError(err instanceof Error ? err.message : "Failed to load");
-    } finally { setModalLoading(false); }
+      toast.error(err instanceof Error ? err.message : "Failed to load");
+    } finally { setBusy(false); }
   };
 
   if (isFuture) return null;
@@ -271,21 +239,16 @@ export default function JournalPage({ params }: { params: Promise<{ date: string
           <div className="flex items-center gap-2">
             {/* Sync button: always available for past entries with local data or cloud changes */}
             {isStale && (
-              <Button size="sm" variant="outline" className="border-amber-500/40 text-amber-400 hover:bg-amber-500/10 text-xs"
-                onClick={() => { setModalError(""); setSyncModal("load"); }}>
+              <Button size="sm" variant="outline" disabled={busy}
+                className="border-amber-500/40 text-amber-400 hover:bg-amber-500/10 text-xs"
+                onClick={handleLoadFromCloud}>
                 ↓ Cloud has changes
               </Button>
             )}
-            {(isToday || hasUnsyncedData) && !hasCloudData && (
-              <Button size="sm" className="bg-indigo-600 hover:bg-indigo-500 text-white"
-                onClick={() => { setModalError(""); setSyncModal("save"); }}>
-                ↑ Sync to cloud
-              </Button>
-            )}
-            {hasCloudData && isToday && (
-              <Button size="sm" className="bg-indigo-600 hover:bg-indigo-500 text-white"
-                onClick={() => { setModalError(""); setSyncModal("save"); }}>
-                ↑ Sync to cloud
+            {(isToday || (hasUnsyncedData && !hasCloudData)) && (
+              <Button size="sm" disabled={busy} className="bg-indigo-600 hover:bg-indigo-500 text-white"
+                onClick={handleSyncToCloud}>
+                {busy ? "Working…" : "↑ Sync to cloud"}
               </Button>
             )}
           </div>
@@ -314,8 +277,8 @@ export default function JournalPage({ params }: { params: Promise<{ date: string
           <span className="text-amber-400">⚠</span>
           <p className="text-sm text-amber-200">A newer version exists in the cloud.</p>
           {!isToday && (
-            <Button size="sm" variant="ghost" className="text-amber-400 ml-auto text-xs"
-              onClick={() => { setModalError(""); setSyncModal("load"); }}>Load it</Button>
+            <Button size="sm" variant="ghost" disabled={busy} className="text-amber-400 ml-auto text-xs"
+              onClick={handleLoadFromCloud}>Load it</Button>
           )}
         </div>
       )}
@@ -466,14 +429,6 @@ export default function JournalPage({ params }: { params: Promise<{ date: string
         </>
       )}
 
-      <PasswordModal open={syncModal==="save"} title="Sync to cloud"
-        description={`Encrypt and save ${isToday ? "today's" : "this"} journal entry to the cloud.`}
-        loading={modalLoading} error={modalError}
-        onClose={() => setSyncModal(null)} onSubmit={handleSyncToCloud} />
-      <PasswordModal open={syncModal==="load"} title="Load from cloud"
-        description="Decrypt and load the cloud version."
-        loading={modalLoading} error={modalError}
-        onClose={() => setSyncModal(null)} onSubmit={handleLoadFromCloud} />
     </div>
   );
 }

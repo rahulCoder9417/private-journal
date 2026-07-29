@@ -2,12 +2,11 @@
 
 import { useState } from "react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { getDraft, markSynced } from "@/hooks/use-journal-db";
-import { deriveKey, encrypt, generateSalt, countWords } from "@/lib/crypto";
+import { countWords } from "@/lib/crypto";
+import { pushEntry } from "@/lib/sync";
 import type { CustomTaskTemplate } from "@/hooks/use-journal-db";
-import { fetchPepper } from "@/lib/pepper";
 
 interface SyncAllModalProps {
   open: boolean;
@@ -17,30 +16,19 @@ interface SyncAllModalProps {
 }
 
 export function SyncAllModal({ open, unsyncedDates, onClose, onComplete }: SyncAllModalProps) {
-  const [password, setPassword] = useState("");
   const [done, setDone] = useState(0);
   const [status, setStatus] = useState<"idle" | "syncing" | "done" | "error">("idle");
   const [error, setError] = useState("");
 
-  const reset = () => { setPassword(""); setDone(0); setStatus("idle"); setError(""); };
+  const reset = () => { setDone(0); setStatus("idle"); setError(""); };
 
   const handleClose = () => { reset(); onClose(); };
 
   const handleSync = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!password) return;
     setStatus("syncing"); setDone(0); setError("");
 
     try {
-      const verify = await fetch("/api/journal/verify-password", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password }),
-      });
-      if (!verify.ok) throw new Error("Wrong password");
-
-      const pepper = await fetchPepper();
-
       for (let i = 0; i < unsyncedDates.length; i++) {
         const date = unsyncedDates[i];
         const draft = await getDraft(date);
@@ -57,9 +45,6 @@ export function SyncAllModal({ open, unsyncedDates, onClose, onComplete }: SyncA
           weeklyGoals: draft.weeklyGoals ?? [],
         };
 
-        const salt = generateSalt();
-        const key = await deriveKey(password + pepper, salt);
-        const { encryptedData, iv } = await encrypt(key, JSON.stringify(content));
         const wc = countWords(
           [
             ...draft.tasks.map((t) => t.text),
@@ -69,19 +54,8 @@ export function SyncAllModal({ open, unsyncedDates, onClose, onComplete }: SyncA
           ].join(" ")
         );
 
-        const saved = await fetch("/api/journal/save", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ date, wordCount: wc, salt, encryptedData, iv }),
-        });
-        if (!saved.ok) {
-          const err = await saved.json();
-          throw new Error(err.error ?? `Save failed for ${date}`);
-        }
-        const savedMeta: { updatedAt: string } = await saved.json();
-        const serverTs = new Date(savedMeta.updatedAt).getTime();
-
-        await markSynced(date, Math.max(serverTs, Date.now()));
+        const syncedAt = await pushEntry(date, content, wc);
+        await markSynced(date, syncedAt);
         setDone(i + 1);
       }
 
@@ -113,14 +87,6 @@ export function SyncAllModal({ open, unsyncedDates, onClose, onComplete }: SyncA
                 <p key={d} className="text-xs text-zinc-500 font-mono">{d}</p>
               ))}
             </div>
-            <Input
-              type="password"
-              placeholder="Your password (used to encrypt)"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              autoFocus
-              className="bg-zinc-900 border-zinc-700 text-zinc-100 placeholder:text-zinc-600"
-            />
             {error && (
               <div className="rounded-lg bg-red-500/10 border border-red-500/20 px-3 py-2">
                 <p className="text-sm text-red-400">{error}</p>
@@ -128,7 +94,7 @@ export function SyncAllModal({ open, unsyncedDates, onClose, onComplete }: SyncA
             )}
             <div className="flex gap-2 justify-end">
               <Button type="button" variant="ghost" className="text-zinc-400" onClick={handleClose}>Cancel</Button>
-              <Button type="submit" disabled={!password} className="bg-indigo-600 hover:bg-indigo-500 text-white">
+              <Button type="submit" className="bg-indigo-600 hover:bg-indigo-500 text-white">
                 Sync all
               </Button>
             </div>

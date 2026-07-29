@@ -13,10 +13,9 @@ import {
   type JournalDraft,
   type WeeklyGoalItem,
 } from "@/hooks/use-journal-db";
-import { deriveKey, encrypt, decrypt, generateSalt, countWords } from "@/lib/crypto";
-import { fetchPepper } from "@/lib/pepper";
+import { countWords } from "@/lib/crypto";
+import { pushEntry, pullEntry } from "@/lib/sync";
 import { playTaskDone, playAllDone } from "@/lib/sounds";
-import { PasswordModal } from "@/components/password-modal";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -112,10 +111,7 @@ export default function HomePage() {
   // On Saturday, goals are loaded from Monday's draft
   const mondayDraftRef = useRef<JournalDraft | null>(null);
   const [isStale, setIsStale] = useState(false);
-  const [syncModal, setSyncModal] = useState<"save" | "load" | null>(null);
-  const [mergeEnabled, setMergeEnabled] = useState(false);
-  const [modalLoading, setModalLoading] = useState(false);
-  const [modalError, setModalError] = useState("");
+  const [busy, setBusy] = useState(false);
   const [syncStatus, setSyncStatus] = useState<"idle" | "saved">("idle");
   const [wordCount, setWordCount] = useState(0);
   const [localHasEntry, setLocalHasEntry] = useState(false);
@@ -307,71 +303,33 @@ export default function HomePage() {
     if (dayOfWeek === 1) setWeeklyGoals(c.weeklyGoals ?? []);
   };
 
-  const handleSyncToCloud = async (password: string) => {
-    setModalLoading(true); setModalError("");
+  const handleSyncToCloud = async (merge: boolean) => {
+    setBusy(true);
     try {
-      const verify = await fetch("/api/journal/verify-password", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password }),
-      });
-      if (!verify.ok) throw new Error("Wrong password");
-
-      const pepper = await fetchPepper();
       let content = currentContent();
-      if (mergeEnabled) {
-        const res = await fetch(`/api/journal/content?date=${todayStr}`);
-        if (res.ok) {
-          const data: { salt: string; encryptedData: string; iv: string } | null = await res.json();
-          if (data) {
-            const k = await deriveKey(password + pepper, data.salt);
-            const plain = await decrypt(k, data.encryptedData, data.iv);
-            content = mergeContents(content, JSON.parse(plain));
-            applyContent(content);
-          }
+      if (merge) {
+        const cloud = await pullEntry<JournalContent>(todayStr);
+        if (cloud) {
+          content = mergeContents(content, cloud);
+          applyContent(content);
         }
       }
-      const salt = generateSalt();
-      const key = await deriveKey(password + pepper, salt);
-      const { encryptedData, iv } = await encrypt(key, JSON.stringify(content));
       const wc = calcWC(content.tasks, content.extraTasks, content.customTasks, content.notes, content.achievements, content.learnings);
+      const syncedAt = await pushEntry(todayStr, content, wc);
 
-      const saved = await fetch("/api/journal/save", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ date: todayStr, wordCount: wc, salt, encryptedData, iv }),
-      });
-      if (!saved.ok) throw new Error((await saved.json()).error ?? "Failed to save");
-      const savedMeta: { updatedAt: string } = await saved.json();
-      const serverTs = new Date(savedMeta.updatedAt).getTime();
-
-      const syncedAt = Math.max(serverTs, Date.now());
       await saveDraft({ date: todayStr, ...content, updatedAt: syncedAt, syncedAt });
-      setIsStale(false); setSyncModal(null);
+      setIsStale(false);
       setSyncStatus("saved"); setTimeout(() => setSyncStatus("idle"), 2500);
     } catch (err) {
-      setModalError(err instanceof Error ? err.message : "Sync failed");
-    } finally { setModalLoading(false); }
+      toast.error(err instanceof Error ? err.message : "Sync failed");
+    } finally { setBusy(false); }
   };
 
-  const handleLoadFromCloud = async (password: string) => {
-    setModalLoading(true); setModalError("");
+  const handleLoadFromCloud = async () => {
+    setBusy(true);
     try {
-      const verify = await fetch("/api/journal/verify-password", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password }),
-      });
-      if (!verify.ok) throw new Error("Wrong password");
-
-      const pepper = await fetchPepper();
-      const res = await fetch(`/api/journal/content?date=${todayStr}`);
-      const data: { salt: string; encryptedData: string; iv: string } | null = await res.json();
-      if (!data) throw new Error("No cloud data found for today");
-      const key = await deriveKey(password + pepper, data.salt);
-      let plain: string;
-      try { plain = await decrypt(key, data.encryptedData, data.iv); }
-      catch { throw new Error("Decryption failed — your password is correct but the server encryption key (ENCRYPTION_SECRET) may have changed since this entry was synced."); }
-      const content: JournalContent = JSON.parse(plain);
+      const content = await pullEntry<JournalContent>(todayStr);
+      if (!content) throw new Error("No cloud data found for today");
       // Ensure backward compat with old synced entries
       content.extraTasks = content.extraTasks ?? [];
       content.customTasks = content.customTasks ?? [];
@@ -380,10 +338,10 @@ export default function HomePage() {
       applyContent(content);
       setWordCount(calcWC(content.tasks, content.extraTasks, content.customTasks, content.notes, content.achievements, content.learnings));
       await saveDraft({ date: todayStr, ...content, weeklyGoals: content.weeklyGoals ?? [], updatedAt: Date.now(), syncedAt: Date.now() });
-      setIsStale(false); setSyncModal(null);
+      setIsStale(false);
     } catch (err) {
-      setModalError(err instanceof Error ? err.message : "Failed to load");
-    } finally { setModalLoading(false); }
+      toast.error(err instanceof Error ? err.message : "Failed to load");
+    } finally { setBusy(false); }
   };
 
   // Completion state
@@ -428,14 +386,22 @@ export default function HomePage() {
         </div>
         <div className="flex items-center gap-2 flex-wrap">
           {isStale && (
-            <Button size="sm" variant="outline" className="border-amber-500/40 text-amber-400 hover:bg-amber-500/10 text-xs"
-              onClick={() => { setModalError(""); setSyncModal("load"); }}>
-              ↓ Cloud has changes
-            </Button>
+            <>
+              <Button size="sm" variant="outline" disabled={busy}
+                className="border-amber-500/40 text-amber-400 hover:bg-amber-500/10 text-xs"
+                onClick={() => handleLoadFromCloud()}>
+                ↓ Cloud has changes
+              </Button>
+              <Button size="sm" variant="outline" disabled={busy}
+                className="border-indigo-500/40 text-indigo-300 hover:bg-indigo-500/10 text-xs"
+                onClick={() => handleSyncToCloud(true)}>
+                ⇅ Merge &amp; sync
+              </Button>
+            </>
           )}
-          <Button size="sm" className="bg-indigo-600 hover:bg-indigo-500 text-white"
-            onClick={() => { setModalError(""); setMergeEnabled(false); setSyncModal("save"); }}>
-            ↑ Sync to cloud
+          <Button size="sm" disabled={busy} className="bg-indigo-600 hover:bg-indigo-500 text-white"
+            onClick={() => handleSyncToCloud(false)}>
+            {busy ? "Working…" : "↑ Sync to cloud"}
           </Button>
         </div>
       </div>
@@ -626,15 +592,6 @@ export default function HomePage() {
         </>
       )}
 
-      <PasswordModal open={syncModal === "save"} title="Sync to cloud"
-        description="Encrypt and save today's journal to the cloud."
-        loading={modalLoading} error={modalError}
-        showMergeOption mergeEnabled={mergeEnabled} onMergeChange={setMergeEnabled}
-        onClose={() => setSyncModal(null)} onSubmit={handleSyncToCloud} />
-      <PasswordModal open={syncModal === "load"} title="Load from cloud"
-        description="Decrypt and load the latest version from the cloud."
-        loading={modalLoading} error={modalError}
-        onClose={() => setSyncModal(null)} onSubmit={handleLoadFromCloud} />
     </div>
   );
 }

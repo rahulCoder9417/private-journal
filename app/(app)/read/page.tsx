@@ -1,16 +1,13 @@
 "use client";
 
 import { useState } from "react";
-import { deriveKey, decrypt } from "@/lib/crypto";
-import { fetchPepper } from "@/lib/pepper";
-import { PasswordModal } from "@/components/password-modal";
+import { pullEntry } from "@/lib/sync";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import type { Task } from "@/hooks/use-journal-db";
 
 interface MetaRow { date: string; wordCount: number; salt: string; updatedAt: string; }
-interface ContentRow { salt: string; encryptedData: string; iv: string; }
 
 interface DecryptedEntry {
   date: string;
@@ -36,49 +33,30 @@ export default function ReadPage() {
 
   const [from, setFrom] = useState(thirtyDaysAgo);
   const [to, setTo] = useState(today);
-  const [metaRows, setMetaRows] = useState<MetaRow[]>([]);
   const [entries, setEntries] = useState<DecryptedEntry[]>([]);
-  const [modalOpen, setModalOpen] = useState(false);
-  const [modalLoading, setModalLoading] = useState(false);
-  const [modalError, setModalError] = useState("");
+  const [decrypting, setDecrypting] = useState(false);
   const [loadError, setLoadError] = useState("");
   const [loaded, setLoaded] = useState(false);
 
   const handleLoad = async () => {
-    setLoadError(""); setLoaded(false); setEntries([]);
+    setLoadError(""); setLoaded(false); setEntries([]); setDecrypting(true);
     try {
       const res = await fetch(`/api/journal/metadata?from=${from}&to=${to}`);
       if (!res.ok) throw new Error("Failed to fetch metadata");
       const rows: MetaRow[] = await res.json();
       if (!rows.length) { setLoadError("No entries found in this date range."); return; }
-      setMetaRows(rows); setModalError(""); setModalOpen(true);
-    } catch (err) {
-      setLoadError(err instanceof Error ? err.message : "Error loading data");
-    }
-  };
 
-  const handleDecrypt = async (password: string) => {
-    setModalLoading(true); setModalError("");
-    try {
-      const pepper = await fetchPepper();
       const results: DecryptedEntry[] = [];
-      for (const meta of metaRows) {
-        const res = await fetch(`/api/journal/content?date=${meta.date}`);
-        if (!res.ok) continue;
-        const contentRow: ContentRow | null = await res.json();
-        if (!contentRow) continue;
-        const key = await deriveKey(password + pepper, contentRow.salt);
-        let plaintext: string;
-        try { plaintext = await decrypt(key, contentRow.encryptedData, contentRow.iv); }
-        catch { throw new Error("Wrong password — decryption failed"); }
-        const parsed = JSON.parse(plaintext);
-        results.push({ date: meta.date, wordCount: meta.wordCount, ...parsed });
+      for (const meta of rows) {
+        const parsed = await pullEntry<Record<string, unknown>>(meta.date);
+        if (!parsed) continue;
+        results.push({ date: meta.date, wordCount: meta.wordCount, ...parsed } as DecryptedEntry);
       }
       results.sort((a, b) => b.date.localeCompare(a.date));
-      setEntries(results); setLoaded(true); setModalOpen(false);
+      setEntries(results); setLoaded(true);
     } catch (err) {
-      setModalError(err instanceof Error ? err.message : "Decryption failed");
-    } finally { setModalLoading(false); }
+      setLoadError(err instanceof Error ? err.message : "Error loading data");
+    } finally { setDecrypting(false); }
   };
 
   return (
@@ -86,7 +64,7 @@ export default function ReadPage() {
       <div>
         <p className="text-xs font-medium text-indigo-400 uppercase tracking-widest mb-0.5">Archive</p>
         <h1 className="text-2xl font-bold text-zinc-100">Read Entries</h1>
-        <p className="text-sm text-zinc-500 mt-1">Select a date range, then enter your password to decrypt.</p>
+        <p className="text-sm text-zinc-500 mt-1">Select a date range — entries are decrypted locally with your unlocked session.</p>
       </div>
 
       <div className="flex flex-wrap items-end gap-3">
@@ -100,8 +78,8 @@ export default function ReadPage() {
           <Input type="date" value={to} onChange={(e) => setTo(e.target.value)}
             className="w-40 bg-zinc-900 border-zinc-700 text-zinc-200" />
         </div>
-        <Button onClick={handleLoad} className="bg-indigo-600 hover:bg-indigo-500 text-white">
-          Load entries
+        <Button onClick={handleLoad} disabled={decrypting} className="bg-indigo-600 hover:bg-indigo-500 text-white">
+          {decrypting ? "Decrypting…" : "Load entries"}
         </Button>
       </div>
 
@@ -164,15 +142,6 @@ export default function ReadPage() {
         );
       })}
 
-      <PasswordModal
-        open={modalOpen}
-        title="Decrypt entries"
-        description={`Enter your password to decrypt ${metaRows.length} entr${metaRows.length === 1 ? "y" : "ies"}.`}
-        loading={modalLoading}
-        error={modalError}
-        onClose={() => setModalOpen(false)}
-        onSubmit={handleDecrypt}
-      />
     </div>
   );
 }
