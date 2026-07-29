@@ -1,6 +1,7 @@
 "use client";
 
 import { openDB, type IDBPDatabase, type DBSchema } from "idb";
+import type { FinanceTx, FinanceSettings } from "@/lib/finance";
 
 export interface Task {
   id: string;
@@ -38,7 +39,13 @@ export interface JournalDraft {
   syncedAt?: number;
 }
 
-interface JournalDBSchema extends DBSchema {
+export interface FinanceMonthState {
+  month: string;
+  syncedAt: number;
+  serverUpdatedAt?: number;
+}
+
+export interface JournalDBSchema extends DBSchema {
   journalDrafts: {
     key: string;
     value: JournalDraft;
@@ -47,13 +54,28 @@ interface JournalDBSchema extends DBSchema {
     key: string;
     value: CustomTaskTemplate;
   };
+  financeTx: {
+    key: string;
+    value: FinanceTx;
+    indexes: { "by-date": string };
+  };
+  financeMonths: {
+    key: string;
+    value: FinanceMonthState;
+  };
+  financeSettings: {
+    key: string;
+    value: FinanceSettings & { key: "settings" };
+  };
 }
 
 let dbInstance: Promise<IDBPDatabase<JournalDBSchema>> | null = null;
 
-function getDB() {
+// Exported so hooks/use-finance-db.ts shares this one connection. Opening the same
+// database twice at different versions would deadlock the upgrade.
+export function getDB() {
   if (!dbInstance) {
-    dbInstance = openDB<JournalDBSchema>("journal-app", 3, {
+    dbInstance = openDB<JournalDBSchema>("journal-app", 4, {
       upgrade(db, oldVersion) {
         if (oldVersion < 1) {
           db.createObjectStore("journalDrafts", { keyPath: "date" });
@@ -61,6 +83,18 @@ function getDB() {
         if (oldVersion < 3) {
           if (!db.objectStoreNames.contains("customTaskTemplates")) {
             db.createObjectStore("customTaskTemplates", { keyPath: "id" });
+          }
+        }
+        if (oldVersion < 4) {
+          if (!db.objectStoreNames.contains("financeTx")) {
+            const store = db.createObjectStore("financeTx", { keyPath: "id" });
+            store.createIndex("by-date", "date");
+          }
+          if (!db.objectStoreNames.contains("financeMonths")) {
+            db.createObjectStore("financeMonths", { keyPath: "month" });
+          }
+          if (!db.objectStoreNames.contains("financeSettings")) {
+            db.createObjectStore("financeSettings", { keyPath: "key" });
           }
         }
       },

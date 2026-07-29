@@ -82,3 +82,40 @@ export const journalContent = pgTable("journal_content", {
   encryptedData: text("encrypted_data").notNull(), // base64 AES-GCM ciphertext
   iv: text("iv").notNull(), // hex-encoded IV
 });
+
+// One row per user. Holds the single PBKDF2 salt shared by every finance blob —
+// written once and NEVER rotated, so the whole ledger costs one key derivation per
+// session and the "new salt / old ciphertext" desync class of bug can't happen.
+// Reusing a salt across blobs is safe: AES-GCM needs a unique IV, and encrypt()
+// draws a fresh random one on every call.
+export const financeVault = pgTable("finance_vault", {
+  id: text("id").primaryKey(),
+  userId: text("user_id")
+    .notNull()
+    .unique()
+    .references(() => user.id, { onDelete: "cascade" }),
+  salt: text("salt").notNull(), // hex-encoded PBKDF2 salt — write once
+  encryptedSettings: text("encrypted_settings").notNull(), // opening balances
+  iv: text("iv").notNull(),
+  createdAt: timestamp("created_at").notNull(),
+  updatedAt: timestamp("updated_at").notNull(),
+});
+
+// One encrypted blob per month: { transactions: FinanceTx[] }. Deliberately no
+// transaction-count column — it would leak spending activity for no benefit, since
+// the client always has the decrypted blob before it needs a count.
+export const financeMonth = pgTable(
+  "finance_month",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    month: text("month").notNull(), // YYYY-MM
+    encryptedData: text("encrypted_data").notNull(),
+    iv: text("iv").notNull(),
+    createdAt: timestamp("created_at").notNull(),
+    updatedAt: timestamp("updated_at").notNull(),
+  },
+  (t) => [uniqueIndex("finance_month_user_month_idx").on(t.userId, t.month)]
+);

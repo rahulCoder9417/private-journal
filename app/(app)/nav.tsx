@@ -3,13 +3,16 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
+import { Lock } from "lucide-react";
 import { signOut } from "@/lib/auth-client";
 import { getAllDrafts } from "@/hooks/use-journal-db";
+import { useVault } from "@/lib/vault";
 import { Button } from "@/components/ui/button";
 import { SyncAllModal } from "@/components/sync-all-modal";
 
 const links = [
   { href: "/", label: "Today" },
+  { href: "/finance", label: "Finance" },
   { href: "/read", label: "Read" },
   { href: "/analytics", label: "Analytics" },
   { href: "/customize", label: "Customize" },
@@ -37,6 +40,8 @@ export function AppNav({ userName }: { userName: string }) {
   }, [checkUnsynced]);
 
   const handleSignOut = async () => {
+    // Clear the in-memory password (and the pepper/key caches) before the session goes.
+    useVault.getState().lock();
     await signOut();
     router.push("/login");
   };
@@ -82,6 +87,12 @@ export function AppNav({ userName }: { userName: string }) {
               </button>
             )}
             <span className="text-xs text-zinc-600 hidden sm:block">{userName}</span>
+            <Button variant="ghost" size="sm" onClick={() => useVault.getState().lock()}
+              title="Lock — requires your password to unlock again"
+              className="text-zinc-500 hover:text-zinc-200 text-xs h-7 px-2 gap-1">
+              <Lock className="w-3 h-3" />
+              Lock
+            </Button>
             <Button variant="ghost" size="sm" onClick={handleSignOut}
               className="text-zinc-500 hover:text-zinc-200 text-xs h-7 px-2">
               Sign out
