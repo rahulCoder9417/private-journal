@@ -20,6 +20,7 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Separator } from "@/components/ui/separator";
+import { DictateButton } from "@/components/dictate-button";
 
 function toYMD(d: Date) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -537,6 +538,7 @@ export default function HomePage() {
         <Textarea value={notes} onChange={e => { setNotes(e.target.value); triggerAutoSave({ notes: e.target.value }); }}
           placeholder="What's on your mind today?" rows={4}
           className="bg-zinc-900/60 border-zinc-700/60 text-zinc-200 placeholder:text-zinc-600 resize-none" />
+        <DictateButton value={notes} onChange={next => { setNotes(next); triggerAutoSave({ notes: next }); }} />
       </Section>
 
       <Separator className="bg-zinc-800" />

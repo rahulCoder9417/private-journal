@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Separator } from "@/components/ui/separator";
+import { DictateButton } from "@/components/dictate-button";
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -353,9 +354,12 @@ export default function JournalPage({ params }: { params: Promise<{ date: string
       {/* Notes */}
       <EntrySection icon="✎" title="Today's Note" accent="zinc">
         {isToday ? (
-          <Textarea value={notes} onChange={e => { setNotes(e.target.value); autoSave({ notes: e.target.value }); }}
-            placeholder="What's on your mind today?" rows={4}
-            className="bg-zinc-900/60 border-zinc-700/60 text-zinc-200 placeholder:text-zinc-600 resize-none" />
+          <>
+            <Textarea value={notes} onChange={e => { setNotes(e.target.value); autoSave({ notes: e.target.value }); }}
+              placeholder="What's on your mind today?" rows={4}
+              className="bg-zinc-900/60 border-zinc-700/60 text-zinc-200 placeholder:text-zinc-600 resize-none" />
+            <DictateButton value={notes} onChange={next => { setNotes(next); autoSave({ notes: next }); }} />
+          </>
         ) : (
           <ReadText text={notes} placeholder="No note recorded." />
         )}
