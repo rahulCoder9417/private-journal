@@ -1,29 +1,24 @@
 // Runs Whisper fully in the browser so dictated audio never leaves the device.
-// Model files (~500MB) download once and are cached by the browser.
+// The model downloads once, is cached by the browser, and stays loaded in this
+// worker so each spoken phrase transcribes without reloading it.
 import { pipeline, type AutomaticSpeechRecognitionPipeline, type ProgressInfo } from "@huggingface/transformers";
 
-const MODEL = "onnx-community/whisper-small";
+const WHISPER_MODEL = "onnx-community/whisper-base.en";
 
-type GPUAdapterLike = { features: { has(f: string): boolean } };
-type GPULike = { requestAdapter(): Promise<GPUAdapterLike | null> };
+type GPULike = { requestAdapter(): Promise<object | null> };
 
 let transcriber: Promise<AutomaticSpeechRecognitionPipeline> | null = null;
 
-async function loadOptions() {
+async function hasWebGPU() {
   const gpu = (navigator as unknown as { gpu?: GPULike }).gpu;
-  const adapter = gpu ? await gpu.requestAdapter().catch(() => null) : null;
-  if (adapter) {
-    return adapter.features.has("shader-f16")
-      ? { device: "webgpu" as const, dtype: { encoder_model: "fp16" as const, decoder_model_merged: "fp16" as const } }
-      : { device: "webgpu" as const, dtype: { encoder_model: "fp32" as const, decoder_model_merged: "q4" as const } };
-  }
-  return { device: "wasm" as const, dtype: { encoder_model: "fp32" as const, decoder_model_merged: "q8" as const } };
+  return !!(gpu && (await gpu.requestAdapter().catch(() => null)));
 }
 
 function getTranscriber() {
-  transcriber ??= loadOptions().then(opts =>
-    pipeline("automatic-speech-recognition", MODEL, {
-      ...opts,
+  transcriber ??= hasWebGPU().then(gpu =>
+    pipeline("automatic-speech-recognition", WHISPER_MODEL, {
+      device: gpu ? "webgpu" : "wasm",
+      dtype: { encoder_model: "fp32", decoder_model_merged: gpu ? "q4" : "q8" },
       progress_callback: (p: ProgressInfo) => {
         if (p.status === "progress_total") self.postMessage({ type: "progress", progress: p.progress });
       },
@@ -46,7 +41,8 @@ self.onmessage = async (e: MessageEvent<{ type: "load" } | { type: "transcribe";
       return;
     }
     const t = await getTranscriber();
-    const out = await t(msg.audio, { language: "english", task: "transcribe", chunk_length_s: 30, stride_length_s: 5 });
+    // Phrases are short; only chunk the rare one longer than Whisper's 30s window.
+    const out = await t(msg.audio, msg.audio.length > 16000 * 30 ? { chunk_length_s: 30, stride_length_s: 5 } : {});
     const text = (Array.isArray(out) ? out.map(o => o.text).join(" ") : out.text).trim();
     self.postMessage({ type: "result", id: msg.id, text });
   } catch (err) {
